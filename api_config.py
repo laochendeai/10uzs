@@ -5,7 +5,8 @@ Gate.io API配置文件
 """
 
 import os
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union
 
 class GateAPIConfig:
     """Gate.io API配置类"""
@@ -44,11 +45,12 @@ class GateAPIConfig:
             self.api_host = "https://fx-api-testnet.gateio.ws"
             self.ws_host = "wss://fx-api-testnet.gateio.ws/ws/v4/"
 
-    def load_from_file(self, config_file: str = "api_keys.txt"):
+    def load_from_file(self, config_file: Optional[Union[str, Path]] = None):
         """从配置文件加载API密钥"""
+        config_path = Path(config_file) if config_file else Path("api_keys.txt")
         try:
-            if os.path.exists(config_file):
-                with open(config_file, 'r', encoding='utf-8') as f:
+            if config_path.exists():
+                with config_path.open('r', encoding='utf-8') as f:
                     for line in f:
                         line = line.strip()
                         if line.startswith('API_KEY='):
