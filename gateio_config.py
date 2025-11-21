@@ -4,12 +4,24 @@ Gate.io VIP0 ETH高频剥头皮交易配置
 基于gate.io平台实际规则定制
 """
 
+import os
+
 # Gate.io平台配置
 EXCHANGE_NAME = "gateio"
 VIP_LEVEL = 0  # VIP等级
 SYMBOL = "ETH_USDT"  # ETH永续合约交易对
 CONTRACT_TYPE = "perpetual"  # 永续合约
 MARGIN_MODE = "isolated"  # 逐仓模式
+FUTURES_SETTLE = "usdt"  # 合约结算币种
+
+# API配置
+API_BASE_URL = os.getenv("GATEIO_API_BASE_URL", "https://api.gateio.ws/api/v4")
+WS_BASE_URL = os.getenv("GATEIO_WS_URL", "wss://fx-ws.gateio.ws/v4/ws/usdt")
+GATEIO_API_KEY = os.getenv("GATEIO_API_KEY", "")
+GATEIO_API_SECRET = os.getenv("GATEIO_API_SECRET", "")
+USE_GATEIO_MARKET_DATA = os.getenv("USE_GATEIO_MARKET_DATA", "false").lower() in ("1", "true", "yes")
+ENABLE_LIVE_TRADING = os.getenv("ENABLE_LIVE_TRADING", "false").lower() in ("1", "true", "yes")
+CONTRACT_VALUE = float(os.getenv("GATEIO_CONTRACT_VALUE", "0.01"))
 
 # Gate.io VIP0费率配置
 MAKER_FEE_RATE = -0.00025  # Maker费率 -0.025% (返还)
@@ -43,12 +55,8 @@ RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
 VOLUME_MA_PERIOD = 20  # 成交量均线周期
 
-# Gate.io交易时段配置 (活跃时段，避开低流动性)
-ACTIVE_TRADING_HOURS = {
-    "asian_session": [(6, 9)],    # 亚洲下午盘 14:00-17:00 北京时间
-    "london_session": [(12, 14)], # 伦敦开盘 20:00-22:00 北京时间
-    "ny_session": [(13, 15)],     # 纽约开盘 21:00-23:00 北京时间
-}
+# Gate.io交易时段配置 (24小时运行)
+ACTIVE_TRADING_HOURS = [(0, 24)]
 
 # 避险时段 (避开重要数据发布)
 HIGH_RISK_HOURS = {
@@ -56,6 +64,32 @@ HIGH_RISK_HOURS = {
     "cpi": [(13, 13, 30)],       # CPI数据 (北京时间 21:30)
     "funding_rate_times": [0, 8, 16]  # 资金费率收取时间前后的波动
 }
+
+# 细化的高风险事件窗口配置（时间为北京时间）
+HIGH_RISK_WINDOWS = [
+    {
+        "name": "non_farm_payrolls",
+        "hour": 20,
+        "minute": 30,
+        "pre_buffer": 5,
+        "post_buffer": 15,
+        "weekdays": [4]  # 周五
+    },
+    {
+        "name": "cpi_release",
+        "hour": 21,
+        "minute": 30,
+        "pre_buffer": 5,
+        "post_buffer": 15
+    },
+    {
+        "name": "fed_rate_decision",
+        "hour": 2,
+        "minute": 0,
+        "pre_buffer": 15,
+        "post_buffer": 20
+    }
+]
 
 # 风控配置 (考虑gate.io爆仓机制)
 MAX_DAILY_LOSS_RATIO = 0.2  # 最大日亏损比例
