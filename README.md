@@ -1,173 +1,99 @@
-# Gate.io ETH高频剥头皮交易系统
+# Gate.io Tick-Level HFT Engine
 
-## 📋 项目概述
+This repository now focuses on a single ultra-lean trading loop that consumes Gate.io futures tick data, generates high-frequency scalping signals, and optionally executes them live via the official `gate-api` SDK. The default entry point matches your production command:
 
-这是一个专门针对Gate.io平台VIP0用户开发的ETH高频剥头皮交易系统。系统基于震荡区间突破策略，捕捉短期价格波动进行快速盈利。
-
-### 核心特点
-- 🎯 **策略明确**: 震荡区间突破 + 1%目标盈利
-- ⚡ **高频执行**: 日内多次小利交易，累计收益
-- 🛡️ **风险控制**: 多层次风险管理和止损机制
-- 💰 **渐进下注**: 10U起步，三次盈利实现复利增长
-- 🔧 **平台适配**: 专为Gate.io VIP0规则优化
-
-## 📈 交易策略详解
-
-### 核心逻辑
-1. **震荡区间识别**: 分析15分钟和1小时图表，识别价格横盘整理区间
-2. **突破信号确认**: 成交量放量的突破信号，配合EMA和RSI确认
-3. **快速入场**: 突破确认后立即入场，75-100倍杠杆
-4. **精确止盈**: 目标1%盈利，达到立即平仓
-5. **严格止损**: 止损设置在区间中轴，单次风险控制在0.3-0.5%
-
-### 渐进式资金管理
-| 交易次数 | 动用资金 | 杠杆 | 目标盈利 | 累计资金 |
-|---------|---------|------|---------|---------|
-| 第1笔    | 10 USDT | 75x  | 10 USDT | 20 USDT |
-| 第2笔    | 15 USDT | 75x  | 15 USDT | 35 USDT |
-| 第3笔    | 25 USDT | 75x  | 25 USDT | 60 USDT |
-
-### 关键规则
-- ✅ 每日最多3次盈利交易
-- ❌ 任何亏损立即停止当日交易
-- 🕐 专注活跃交易时段（亚洲下午盘、欧美开盘）
-- 🚫 避开重要数据发布时段
-
-## 🏗️ 系统架构
-
-```
-trading_engine.py          # 主交易引擎
-├── gateio_config.py       # Gate.io平台配置
-├── range_detector.py      # 震荡区间检测
-├── technical_indicators.py # 技术指标计算
-├── risk_management.py     # 风险管理
-└── position_manager.py    # 仓位管理
-```
-
-## ⚙️ 配置说明
-
-### Gate.io平台配置 (gateio_config.py)
-```python
-# 基础交易配置
-SYMBOL = "ETH_USDT"           # ETH永续合约
-VIP_LEVEL = 0                  # VIP等级
-LEVERAGE = 75                 # 默认杠杆
-
-# VIP0费率
-MAKER_FEE_RATE = -0.00025     # Maker费率 -0.025% (返还)
-TAKER_FEE_RATE = 0.0005       # Taker费率 0.05%
-```
-
-### 风险控制参数
-```python
-MAX_TRADES_PER_DAY = 3        # 每日最大交易次数
-PROFIT_TARGET = 0.01          # 目标盈利 1%
-STOP_LOSS = 0.004            # 止损幅度 0.4%
-MAX_DAILY_LOSS_RATIO = 0.2   # 最大日亏损 20%
-```
-
-## 🚀 快速开始
-
-### 环境要求
-- Python 3.8+
-- 必需库: pandas, numpy, asyncio
-
-### 安装依赖
 ```bash
-pip install pandas numpy asyncio
+python run_true_hft.py --live --initial 10
 ```
 
-### 配置Gate.io API (需要实现)
-1. 在Gate.io申请API密钥
-2. 配置API密钥到系统中
-3. 确保账户有足够的USDT保证金
+If the `--live` flag is omitted the engine runs in a fully simulated mode so you can profile logic without touching the exchange.
 
-### 启动交易系统
+## Key Capabilities
+- **Real tick + order-book feed** – `gateio_ws.py` subscribes to `futures.tickers`, `futures.order_book`, `futures.candlesticks`, and `futures.trades`, exposing microstructure metrics to the engine.
+- **Composite HFT signals** – `hft_signal_generator.py` blends momentum, volume spikes, order-book imbalance, adaptive thresholds, and market-state filters to create long/short entries with confidence scores.
+- **Aggressive execution** – `HFTExecutor` in `hft_executor.py` prefers IOC limit orders with millisecond timeouts and seamlessly falls back to market orders; all requests go through the official Gate.io Python SDK.
+- **Survival rules & risk gating** – `survival_rules.py` and `aggressive_position_manager.py` enforce capital usage policies, leverage limits, and stop trading when loss caps hit.
+- **Rich terminal UI** – `tui_display.py` uses `rich` to stream ticks, current stats, and recent logs directly in the terminal while the strategy is running.
+
+## Project Layout
+```
+run_true_hft.py          # CLI wrapper (argparse + asyncio)
+true_hft_engine.py       # Core event loop and state machine
+hft_config.py            # All tunable parameters (leverage, filters, safeguards)
+gateio_ws.py             # WebSocket market-data client
+gateio_api.py            # REST trading helper built on gate-api SDK
+hft_data_manager.py      # Rolling buffers for ticks, order book, and derived frames
+hft_signal_generator.py  # Signal construction logic
+hft_executor.py          # Order placement / throttling / stop hooks
+aggressive_position_manager.py
+survival_rules.py
+hft_performance.py       # Optional live metrics aggregation
+tui_display.py           # Streaming dashboard
+```
+
+## Requirements
+- Python 3.9+
+- Gate.io API key with **Futures trading** permissions
+- Dependencies in `requirements.txt` (notably `gate-api`, `websockets`, `rich`)
+
+Install dependencies once:
 ```bash
-python trading_engine.py
+pip install -r requirements.txt
 ```
 
-## 📊 监控界面
+## Configure Gate.io Credentials
+The engine uses `api_config.py` to load credentials. Either:
 
-系统提供实时监控信息：
-- 📈 当前价格和技术指标
-- 🎯 震荡区间和突破信号
-- 💰 资金状况和持仓信息
-- ⚠️ 风险警告和止损状态
-- 📊 每日交易统计
-
-### 日志输出示例
-```
-🚀 启动高频剥头皮交易引擎
-📈 生成交易信号: bullish_breakout - 置信度: 0.78
-✅ 开仓成功: pos_20251116_143022 - long 大小: 0.1333 - 杠杆: 75x
-🎯 止盈触发: 10.50 USDT
-```
-
-## 🛡️ 安全特性
-
-### 多层风险管理
-1. **入场前评估**: 信号质量、风险回报比、市场条件
-2. **实时监控**: 保证金比例、爆仓距离、市场波动
-3. **自动止损**: 移动止损、时间止损、连续亏损保护
-4. **资金保护**: 每日亏损限制、最大仓位限制
-
-### Gate.io特定规则
-- ✅ VIP0手续费优化
-- ✅ 逐仓模式风险隔离
-- ✅ 资金费率时间规避
-- ✅ 最小订单价值检查
-
-## 📈 性能指标
-
-### 系统统计
-- **交易频率**: 日均3-5次
-- **平均持仓时间**: 2-10分钟
-- **目标胜率**: 70%+
-- **风险回报比**: 2.5:1+
-
-### 历史回测 (模拟)
-- 月收益: 50-100%
-- 最大回撤: <15%
-- 夏普比率: >2.0
-
-## ⚠️ 风险提示
-
-1. **高风险策略**: 高杠杆交易可能导致快速亏损
-2. **市场风险**: 极端行情下可能触发强制平仓
-3. **技术风险**: 网络延迟、API故障可能影响交易
-4. **平台风险**: Gate.io规则变更可能影响策略有效性
-
-### 建议使用
-- 仅用可承受损失的资金进行交易
-- 建议从小资金开始测试
-- 密切监控系统运行状态
-- 定期评估策略表现
-
-## 🔧 故障排除
-
-### 常见问题
-1. **API连接失败**: 检查网络连接和API配置
-2. **仓位无法开立**: 检查保证金是否充足
-3. **信号生成过少**: 市场可能处于趋势行情，不适合震荡策略
-4. **频繁止损**: 可能市场波动过大，建议暂停交易
-
-### 日志查看
+**A. Environment variables (recommended)**
 ```bash
-tail -f trading_engine.log
+export GATEIO_API_KEY="your_api_key"
+export GATEIO_API_SECRET="your_api_secret"
+export GATEIO_PASSPHRASE="optional_passphrase"
+export ENABLE_LIVE_TRADING=true
 ```
 
-## 📞 技术支持
+**B. Local `api_keys.txt`**
+```
+API_KEY=your_api_key
+API_SECRET=your_api_secret
+PASSPHRASE=optional_passphrase
+TESTNET=false
+```
+Copy the template with `cp api_keys.txt.example api_keys.txt` and fill in your values.
 
-- 系统基于Gate.io官方文档开发
-- 代码结构模块化，便于维护和扩展
-- 提供完整的日志记录和错误处理
-- 支持参数配置和策略调整
+> ⚠️ The leverage API requires the futures wallet to have available margin. If you see `INSUFFICIENT_AVAILABLE`, transfer funds to the contract account or reduce the configured leverage in `hft_config.py`.
 
-## 📄 免责声明
+## Running the Engine
+```bash
+# Simulation with virtual capital
+python run_true_hft.py --initial 50
 
-本系统仅供学习和研究使用。加密货币交易存在极高风险，可能导致资金损失。使用者应充分了解相关风险，并在可承受范围内使用。开发者不对交易损失承担任何责任。
+# Live trading (uses Gate.io REST + WebSocket)
+python run_true_hft.py --live --initial 10
+```
+- `--initial` only affects statistics; in live mode actual account balances are fetched through `/api/v4/futures/accounts`.
+- When `--live` is set, the engine:
+  1. Starts the WebSocket client and signal loop.
+  2. Loads API credentials and attempts to set leverage via `update_position_leverage` (skipped if the wallet is empty).
+  3. Pulls available margin every ~30 seconds for survival checks.
+  4. Routes filled orders to the executor, which tracks latency and attaches protective stops when enabled.
 
----
+## Customising Behaviour
+All knobs live in `hft_config.py`. Notable settings:
+- `momentum_*`, `order_imbalance_min`, `composite_entry_threshold` – signal sensitivity.
+- `leverage`, `fixed_margin`, `min_contract_margin` – capital allocation per trade.
+- `enable_trailing_stop`, `trailing_*`, `partial_profit_*` – exit logic.
+- `enable_protective_stops`, `stop_order_price_type`, `stop_order_expiration` – exchange stop order parameters.
 
-**⚡ 开始您的高频剥头皮交易之旅！**
+Change values, then restart the script. The engine logs active parameters on boot to help with back-to-back tweaks.
+
+## Troubleshooting
+| Symptom | Likely Cause | Fix |
+| --- | --- | --- |
+| `INVALID_KEY` on startup | Wrong API key/secret or missing Futures permission | Regenerate credentials on Gate.io and update env / `api_keys.txt`. |
+| `INSUFFICIENT_AVAILABLE` when setting leverage | Futures wallet empty | Transfer USDT to the contract account or disable `--live`. |
+| No ticks in UI | Firewall blocking WebSocket or wrong contract symbol in `gateio_config.py` | Ensure outbound `wss://fx-ws.gateio.ws` is reachable and symbol matches `ETH_USDT` (default). |
+| Orders stay `open` | `hft_executor` hit IOC timeout before fill | Increase `limit_order_timeout` or disable `use_limit_orders`. |
+
+## Disclaimer
+This codebase is strictly for educational and research purposes. Cryptocurrency derivatives are highly risky. Use only capital you can afford to lose, and comply with all applicable regulations.

@@ -1,0 +1,77 @@
+{
+  "generated_at": "2025-11-26T05:14:19.934901+00:00",
+  "target_accuracy": 0.65,
+  "max_drawdown_limit": 0.08,
+  "min_signals": 10,
+  "fallback_used": true,
+  "result": {
+    "variant": "orderbook_005",
+    "overrides": {
+      "name": "orderbook_005",
+      "trend_signal_mode": "orderbook_imbalance",
+      "trend_orderbook_min_imbalance": 0.05,
+      "trend_volume_ratio": 1.2,
+      "trend_orderbook_use": true,
+      "trend_use_cross_confirmation": false,
+      "trend_signal_cooldown": 2.0,
+      "trend_fast_window": 15,
+      "trend_slow_window": 45,
+      "trend_min_diff": 0.00015
+    },
+    "signals_generated": 13,
+    "positions_opened": 13,
+    "total_trades": 13,
+    "win_rate": 0.5384615384615384,
+    "direction_accuracy": 0.5384615384615384,
+    "lookahead_accuracy": 0.23076923076923078,
+    "lookahead_samples": 13,
+    "entry_blocks": 0,
+    "duplicate_blocks": 0,
+    "total_pnl": -0.8338909216887527,
+    "max_drawdown_abs": 2.8462836337957205,
+    "max_drawdown_ratio": 0.28462836337957204,
+    "error_cases": [
+      {
+        "timestamp": "2021-03-11T16:49:00",
+        "direction": "short",
+        "confidence": 0.95,
+        "composite": 0.0,
+        "votes": null,
+        "reason": "passed"
+      },
+      {
+        "timestamp": "2021-03-11T16:50:00",
+        "direction": "short",
+        "confidence": 0.95,
+        "composite": 0.0,
+        "votes": null,
+        "reason": "passed"
+      },
+      {
+        "timestamp": "2021-03-11T16:51:00",
+        "direction": "short",
+        "confidence": 0.95,
+        "composite": 0.0,
+        "votes": null,
+        "reason": "passed"
+      },
+      {
+        "timestamp": "2021-03-11T16:55:00",
+        "direction": "short",
+        "confidence": 0.95,
+        "composite": 0.0,
+        "votes": null,
+        "reason": "passed"
+      },
+      {
+        "timestamp": "2021-03-11T16:56:00",
+        "direction": "short",
+        "confidence": 0.95,
+        "composite": 0.0,
+        "votes": null,
+        "reason": "passed"
+      }
+    ]
+  },
+  "meets_target": false
+}

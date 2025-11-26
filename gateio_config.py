@@ -4,12 +4,40 @@ Gate.io VIP0 ETH高频剥头皮交易配置
 基于gate.io平台实际规则定制
 """
 
+import os
+
 # Gate.io平台配置
 EXCHANGE_NAME = "gateio"
 VIP_LEVEL = 0  # VIP等级
 SYMBOL = "ETH_USDT"  # ETH永续合约交易对
 CONTRACT_TYPE = "perpetual"  # 永续合约
 MARGIN_MODE = "isolated"  # 逐仓模式
+FUTURES_SETTLE = "usdt"  # 合约结算币种
+
+# API配置
+TESTNET_MODE = os.getenv("GATEIO_TESTNET", "false").lower() in ("1", "true", "yes")
+_LIVE_API_BASE = "https://api.gateio.ws/api/v4"
+_LIVE_WS_BASE = "wss://fx-ws.gateio.ws/v4/ws/usdt"
+_DEFAULT_API_BASE = "https://api-testnet.gateapi.io/api/v4" if TESTNET_MODE else _LIVE_API_BASE
+_DEFAULT_WS_BASE = "wss://fx-ws-testnet.gateio.ws/v4/ws/usdt" if TESTNET_MODE else _LIVE_WS_BASE
+
+API_BASE_URL = os.getenv("GATEIO_API_BASE_URL", _DEFAULT_API_BASE)
+WS_BASE_URL = os.getenv("GATEIO_WS_URL", _DEFAULT_WS_BASE)
+
+MARKET_DATA_USE_MAINNET = os.getenv("GATEIO_MARKET_DATA_USE_MAINNET", "true").lower() in ("1", "true", "yes")
+MARKET_DATA_API_BASE_URL = os.getenv(
+    "GATEIO_MARKET_API_BASE_URL",
+    _LIVE_API_BASE if MARKET_DATA_USE_MAINNET else API_BASE_URL
+)
+MARKET_DATA_WS_URL = os.getenv(
+    "GATEIO_MARKET_WS_URL",
+    _LIVE_WS_BASE if MARKET_DATA_USE_MAINNET else WS_BASE_URL
+)
+GATEIO_API_KEY = os.getenv("GATEIO_API_KEY", "")
+GATEIO_API_SECRET = os.getenv("GATEIO_API_SECRET", "")
+USE_GATEIO_MARKET_DATA = os.getenv("USE_GATEIO_MARKET_DATA", "false").lower() in ("1", "true", "yes")
+ENABLE_LIVE_TRADING = os.getenv("ENABLE_LIVE_TRADING", "false").lower() in ("1", "true", "yes")
+CONTRACT_VALUE = float(os.getenv("GATEIO_CONTRACT_VALUE", "0.01"))
 
 # Gate.io VIP0费率配置
 MAKER_FEE_RATE = -0.00025  # Maker费率 -0.025% (返还)
@@ -43,12 +71,8 @@ RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
 VOLUME_MA_PERIOD = 20  # 成交量均线周期
 
-# Gate.io交易时段配置 (活跃时段，避开低流动性)
-ACTIVE_TRADING_HOURS = {
-    "asian_session": [(6, 9)],    # 亚洲下午盘 14:00-17:00 北京时间
-    "london_session": [(12, 14)], # 伦敦开盘 20:00-22:00 北京时间
-    "ny_session": [(13, 15)],     # 纽约开盘 21:00-23:00 北京时间
-}
+# Gate.io交易时段配置 (24小时运行)
+ACTIVE_TRADING_HOURS = [(0, 24)]
 
 # 避险时段 (避开重要数据发布)
 HIGH_RISK_HOURS = {
@@ -56,6 +80,56 @@ HIGH_RISK_HOURS = {
     "cpi": [(13, 13, 30)],       # CPI数据 (北京时间 21:30)
     "funding_rate_times": [0, 8, 16]  # 资金费率收取时间前后的波动
 }
+
+# 细化的高风险事件窗口配置（时间为北京时间）
+HIGH_RISK_WINDOWS = [
+    {
+        "name": "non_farm_payrolls",
+        "hour": 20,
+        "minute": 30,
+        "pre_buffer": 5,
+        "post_buffer": 15,
+        "weekdays": [4]  # 周五
+    },
+    {
+        "name": "cpi_release",
+        "hour": 21,
+        "minute": 30,
+        "pre_buffer": 5,
+        "post_buffer": 15
+    },
+    {
+        "name": "fed_rate_decision",
+        "hour": 2,
+        "minute": 0,
+        "pre_buffer": 15,
+        "post_buffer": 20
+    },
+    {
+        "name": "fomc_press_conference",
+        "hour": 2,
+        "minute": 30,
+        "pre_buffer": 20,
+        "post_buffer": 30
+    },
+    {
+        "name": "us_gdp_release",
+        "hour": 20,
+        "minute": 30,
+        "pre_buffer": 10,
+        "post_buffer": 20,
+        "weekdays": [3]  # 周四常规发布
+    },
+    {
+        "name": "core_pce_release",
+        "hour": 20,
+        "minute": 30,
+        "pre_buffer": 10,
+        "post_buffer": 20,
+        "weekdays": [4]
+    }
+]
+NEWS_COOLDOWN_MINUTES = 30
 
 # 风控配置 (考虑gate.io爆仓机制)
 MAX_DAILY_LOSS_RATIO = 0.2  # 最大日亏损比例

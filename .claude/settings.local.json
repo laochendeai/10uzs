@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod:*)",
+      "mcp__web-search-prime__webSearchPrime",
+      "WebFetch(domain:www.gate.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.oracle.com)",
+      "WebFetch(domain:www.gate.com)",
+      "WebFetch(domain:www.gate.hk)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
