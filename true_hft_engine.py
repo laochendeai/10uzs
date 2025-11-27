@@ -275,32 +275,35 @@ class TrueHFTEngine:
                         orderbook=orderbook,
                         higher_timeframes=higher_timeframes
                     )
-                    if self.enable_signal_debug:
-                        debug_info = getattr(self.signal_generator, 'last_debug', {})
-                        if (not signal) and debug_info and time.time() - self._last_signal_debug_log > 1:
-                            breakout_val = debug_info.get('breakout_strength')
-                            breakout_display = f"{breakout_val:.4f}" if isinstance(breakout_val, (int, float)) else breakout_val
-                            volume_ratio = debug_info.get('volume_ratio')
-                            volume_display = f"{volume_ratio:.2f}" if isinstance(volume_ratio, (int, float)) else volume_ratio
-                            self._log(
-                                f"🔍 信号调试: reason={debug_info.get('reason')} "
-                                f"| dir={debug_info.get('direction')} "
-                                f"| breakout={breakout_display} "
-                                f"| volume={volume_display}"
-                            )
-                            self._last_signal_debug_log = time.time()
-                            self._register_guard_pressure(
-                                self._categorize_guard_reason(debug_info.get('reason'))
-                            )
-                    if signal and self._confirm_trend_direction(signal, trend_bias):
-                        self._log_trend_analysis(trend_bias, signal)
-                        signal_time = signal.get('timestamp')
-                        signal_time = signal_time if isinstance(signal_time, datetime) else None
-                        await self._execute_signal(signal, signal_time)
+                if self.enable_signal_debug:
+                    debug_info = getattr(self.signal_generator, 'last_debug', {})
+                    if (not signal) and debug_info and time.time() - self._last_signal_debug_log > 1:
+                        breakout_val = debug_info.get('breakout_strength')
+                        breakout_display = f"{breakout_val:.4f}" if isinstance(breakout_val, (int, float)) else breakout_val
+                        volume_ratio = debug_info.get('volume_ratio')
+                        volume_display = f"{volume_ratio:.2f}" if isinstance(volume_ratio, (int, float)) else volume_ratio
                         self._log(
-                            f"🎯 信号: {signal['direction']} 信心 {signal['confidence']:.2f} | "
-                            f"trend {signal.get('composite_trend', 0):.2f} | state {signal.get('market_state')}"
+                            f"🔍 信号调试: reason={debug_info.get('reason')} "
+                            f"| dir={debug_info.get('direction')} "
+                            f"| breakout={breakout_display} "
+                            f"| volume={volume_display}"
                         )
+                        self._last_signal_debug_log = time.time()
+                        self._register_guard_pressure(
+                            self._categorize_guard_reason(debug_info.get('reason'))
+                        )
+                if signal and self._confirm_trend_direction(signal, trend_bias):
+                    if self._is_low_volatility_blocked():
+                        self._log("⏸️ 低波动过滤: 暂停开仓")
+                        continue
+                    self._log_trend_analysis(trend_bias, signal)
+                    signal_time = signal.get('timestamp')
+                    signal_time = signal_time if isinstance(signal_time, datetime) else None
+                    await self._execute_signal(signal, signal_time)
+                    self._log(
+                        f"🎯 信号: {signal['direction']} 信心 {signal['confidence']:.2f} | "
+                        f"trend {signal.get('composite_trend', 0):.2f} | state {signal.get('market_state')}"
+                    )
 
                 tick_time = None
                 if self.data_manager.data_buffers['ticks']:
@@ -1351,6 +1354,17 @@ class TrueHFTEngine:
                         if not self._news_cooldown_until or cooldown_end > self._news_cooldown_until:
                             self._news_cooldown_until = cooldown_end
                     return True
+        return False
+
+    def _is_low_volatility_blocked(self) -> bool:
+        if not self.config.get('low_volatility_block', False):
+            return False
+        threshold = float(self.config.get('low_volatility_threshold', 0.0))
+        if threshold <= 0:
+            return False
+        vol = self.data_manager.estimate_tick_volatility(window=60)  # 约 1 分钟窗口
+        if vol < threshold:
+            return True
         return False
 
     def _apply_progressive_margin(self, margin: float) -> float:
