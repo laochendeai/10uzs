@@ -84,11 +84,13 @@ class HFTExecutor:
         if self._order_success(result):
             stop_ratio = position_config.get('stop_loss_ratio') or signal.get('stop_loss_ratio') or self.default_stop_loss_ratio
             stop_order_id = await self._set_stop_loss(signal, result, reference_price, stop_ratio)
+            fills = await self._fetch_fills(result)
             return {
                 'status': 'filled',
                 'order_id': result.get('id'),
                 'latency': latency,
-                'stop_order_id': stop_order_id
+                'stop_order_id': stop_order_id,
+                'fills': fills
             }
         return {'status': 'failed', 'reason': result.get('status', 'not_filled')}
 
@@ -122,12 +124,14 @@ class HFTExecutor:
         if self._order_success(result):
             stop_ratio = position_config.get('stop_loss_ratio') or signal.get('stop_loss_ratio') or self.default_stop_loss_ratio
             stop_order_id = await self._set_stop_loss(signal, result, limit_price, stop_ratio)
+            fills = await self._fetch_fills(result)
             return {
                 'status': 'filled',
                 'order_id': result.get('id'),
                 'latency': latency,
                 'mode': 'limit',
-                'stop_order_id': stop_order_id
+                'stop_order_id': stop_order_id,
+                'fills': fills
             }
         return {'status': 'failed', 'reason': result.get('status', 'limit_not_filled')}
 
@@ -183,6 +187,34 @@ class HFTExecutor:
     @property
     def supports_exchange_stops(self) -> bool:
         return bool(self.api_client) and self.enable_exchange_stop_orders
+
+    async def _fetch_fills(self, order_result: Dict) -> Optional[list]:
+        """尝试获取该订单的成交明细，返回列表[{price, size, fee, role}]"""
+        if not self.api_client:
+            return None
+        order_id = order_result.get('id')
+        if not order_id:
+            return None
+        try:
+            trades = await self.api_client.get_trade_history(order_id=str(order_id))
+        except Exception:
+            return None
+        fills = []
+        for trade in trades or []:
+            price = trade.get('price')
+            size = trade.get('size')
+            fee = trade.get('fee')
+            role = trade.get('role')
+            try:
+                fills.append({
+                    'price': float(price) if price is not None else None,
+                    'size': float(size) if size is not None else None,
+                    'fee': float(fee) if fee is not None else 0.0,
+                    'role': role
+                })
+            except Exception:
+                continue
+        return fills or None
 
     def _extract_fill_price(self, order_result: Dict) -> Optional[float]:
         """Best-effort获取成交均价"""

@@ -477,6 +477,7 @@ class TrueHFTEngine:
                 'entry_time': now,
                 'remaining_ratio': 1.0,
                 'partial_taken': False,
+                'fills': result.get('fills'),
                 'profile': trade_profile
             }
             if self.signal_events:
@@ -553,12 +554,32 @@ class TrueHFTEngine:
         if remaining_ratio <= 0:
             return
 
+        fills = position.get('fills') or []
         pnl = self._calculate_ratio_pnl(position, price, remaining_ratio)
         fee_rate = self._fee_rates.get('taker', TAKER_FEE_RATE)
         funding_rate = self._current_funding_rate()
         notional = abs(float(position.get('size', 0.0))) * price * min(max(remaining_ratio, 0.0), 1.0)
         total_fee = notional * (fee_rate + funding_rate)
         pnl -= total_fee
+        if fills:
+            realized = 0.0
+            total_fee_actual = 0.0
+            total_size = 0.0
+            entry = position['entry_price']
+            for fill in fills:
+                f_price = fill.get('price')
+                f_size = abs(float(fill.get('size') or 0.0))
+                f_fee = float(fill.get('fee') or 0.0)
+                if not f_price or f_size <= 0:
+                    continue
+                if position['direction'] == 'long':
+                    realized += (price - entry) * f_size
+                else:
+                    realized += (entry - price) * f_size
+                total_fee_actual += f_fee
+                total_size += f_size
+            if total_size > 0:
+                pnl = realized - total_fee_actual
         self._finalize_signal_event(position_id, pnl, reason, price)
         self.current_capital += pnl
         self.stats['total_trades'] += 1
