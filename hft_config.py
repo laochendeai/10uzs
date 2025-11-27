@@ -104,8 +104,8 @@ HFT_CONFIG = {
     'max_position_duration': 0,
     'slippage_tolerance': 0.0002,
     'use_limit_orders': True,
-    'limit_order_premium': 0.0005,
-    'limit_order_timeout': 3.0,   # 3秒未成交撤单
+    'limit_order_premium': 0.0001,
+    'limit_order_timeout': 5.0,   # 5秒未成交撤单
     'fallback_to_market': False,  # 不回落到市价，避免滑点和高手续费
 
     # 风险控制
