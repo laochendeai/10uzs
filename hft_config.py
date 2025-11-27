@@ -93,20 +93,20 @@ HFT_CONFIG = {
 
     # 执行参数
     'leverage': 5,
-    'base_target_profit_ratio': 0.0012,
-    'base_stop_loss_ratio': 0.0008,
-    'target_profit_ratio': 0.0012,
-    'stop_loss_ratio': 0.0008,
-    'trend_target_profit_ratio': 0.0012,
-    'trend_stop_loss_ratio': 0.0008,
-    'range_target_profit_ratio': 0.0012,
-    'range_stop_loss_ratio': 0.0008,
+    'base_target_profit_ratio': 0.008,
+    'base_stop_loss_ratio': 0.004,
+    'target_profit_ratio': 0.008,
+    'stop_loss_ratio': 0.004,
+    'trend_target_profit_ratio': 0.008,
+    'trend_stop_loss_ratio': 0.004,
+    'range_target_profit_ratio': 0.008,
+    'range_stop_loss_ratio': 0.004,
     'max_position_duration': 0,
     'slippage_tolerance': 0.0002,
     'use_limit_orders': True,
     'limit_order_premium': 0.0005,
-    'limit_order_timeout': 0.2,
-    'fallback_to_market': True,
+    'limit_order_timeout': 3.0,   # 3秒未成交撤单
+    'fallback_to_market': False,  # 不回落到市价，避免滑点和高手续费
 
     # 风险控制
     'daily_trade_limit': 300,
@@ -144,15 +144,15 @@ HFT_CONFIG = {
     'min_contract_margin': 3.0,  # 至少满足交易所单张保证金要求
     'max_contracts_per_trade': 1,
     'max_margin_ratio': 0.25,
-    'min_stop_loss_ratio': 0.0008,
+    'min_stop_loss_ratio': 0.002,
     'atr_timeframe': '60s',
     'atr_window': 14,
     'atr_stop_multiplier': 1.1,
     'atr_volatility_anchor': 0.001,
 
     # 保护性委托
-    'enable_protective_stops': True,
-    'enable_protective_take_profit': True,
+    'enable_protective_stops': False,
+    'enable_protective_take_profit': False,
     'stop_order_price_type': 1,  # 0 最新成交价, 1 标记价
     'stop_order_expiration': 86400,  # Gate.io 触发单要求按天为单位
     'take_profit_order_price_type': 1,

@@ -107,7 +107,7 @@ class HFTExecutor:
             'side': side,
             'order_type': 'limit',
             'price': limit_price,
-            'time_in_force': 'ioc',
+            'time_in_force': 'gtc',
             'reduce_only': False
         }
 
@@ -121,19 +121,37 @@ class HFTExecutor:
             return {'status': 'timeout', 'reason': 'limit_timeout'}
 
         latency = time.time() - start
+        order_id = result.get('id')
         if self._order_success(result):
             stop_ratio = position_config.get('stop_loss_ratio') or signal.get('stop_loss_ratio') or self.default_stop_loss_ratio
             stop_order_id = await self._set_stop_loss(signal, result, limit_price, stop_ratio)
             fills = await self._fetch_fills(result)
             return {
                 'status': 'filled',
-                'order_id': result.get('id'),
+                'order_id': order_id,
                 'latency': latency,
                 'mode': 'limit',
                 'stop_order_id': stop_order_id,
                 'fills': fills
             }
-        return {'status': 'failed', 'reason': result.get('status', 'limit_not_filled')}
+        # 未立即成交，等待 limit_timeout 后检查并撤单
+        await asyncio.sleep(max(limit_timeout, 0.01))
+        status = await self.api_client.get_order_status(str(order_id))
+        if self._order_success(status):
+            stop_ratio = position_config.get('stop_loss_ratio') or signal.get('stop_loss_ratio') or self.default_stop_loss_ratio
+            stop_order_id = await self._set_stop_loss(signal, status, limit_price, stop_ratio)
+            fills = await self._fetch_fills(status)
+            return {
+                'status': 'filled',
+                'order_id': order_id,
+                'latency': latency,
+                'mode': 'limit',
+                'stop_order_id': stop_order_id,
+                'fills': fills
+            }
+        # 超时未成交，撤单
+        await self.api_client.cancel_order(str(order_id))
+        return {'status': 'timeout', 'reason': 'limit_not_filled'}
 
     async def _set_stop_loss(
         self,

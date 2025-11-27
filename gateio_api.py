@@ -370,6 +370,7 @@ class GateIOAPI:
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
         role: Optional[str] = None,
+        order_id: Optional[str] = None,
     ) -> List[Dict]:
         """拉取账户成交记录"""
         if not self.can_trade:
@@ -380,6 +381,8 @@ class GateIOAPI:
             "limit": min(max(limit, 1), 1000),
             "offset": max(offset, 0),
         }
+        if order_id:
+            params["order_id"] = order_id
 
         use_timerange = start_time is not None or end_time is not None or role
         if use_timerange:
