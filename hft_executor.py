@@ -98,7 +98,7 @@ class HFTExecutor:
                                  current_price: float, limit_premium: float,
                                  limit_timeout: float):
         side = signal['direction']
-        price_adjustment = 1 + limit_premium if side == 'long' else 1 - limit_premium
+        price_adjustment = 1 - limit_premium if side == 'long' else 1 + limit_premium
         limit_price = current_price * price_adjustment
 
         params = {

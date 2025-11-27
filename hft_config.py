@@ -151,8 +151,8 @@ HFT_CONFIG = {
     'atr_volatility_anchor': 0.001,
 
     # 保护性委托
-    'enable_protective_stops': False,
-    'enable_protective_take_profit': False,
+    'enable_protective_stops': True,
+    'enable_protective_take_profit': True,
     'stop_order_price_type': 1,  # 0 最新成交价, 1 标记价
     'stop_order_expiration': 86400,  # Gate.io 触发单要求按天为单位
     'take_profit_order_price_type': 1,
