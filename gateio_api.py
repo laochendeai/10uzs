@@ -32,6 +32,8 @@ from gateio_config import (
     ORDER_TYPE,
     SYMBOL,
     USE_GATEIO_MARKET_DATA,
+    MAKER_FEE_RATE,
+    TAKER_FEE_RATE,
 )
 
 
@@ -73,6 +75,18 @@ class GateIOAPI:
             )
             self.market_api_client = ApiClient(market_configuration)
             self.market_futures_api = FuturesApi(self.market_api_client)
+
+        now = time.time()
+        self._fee_cache = {
+            "maker": MAKER_FEE_RATE,
+            "taker": TAKER_FEE_RATE,
+            "timestamp": now - 9999,
+        }
+        self._funding_cache = {
+            "rate": 0.0,
+            "next_funding_time": None,
+            "timestamp": now - 9999,
+        }
 
     @property
     def can_use_market_data(self) -> bool:
@@ -212,12 +226,102 @@ class GateIOAPI:
         if not self.can_trade:
             return None
 
-        rule = 2 if side.lower() == "long" else 1
-        auto_size = "close_long" if side.lower() == "long" else "close_short"
+        return await self._place_price_triggered_order(
+            contract=contract,
+            side=side,
+            trigger_price=trigger_price,
+            price_type=price_type,
+            expiration=expiration,
+            tp=False
+        )
+
+    async def place_take_profit_order(
+        self,
+        contract: str,
+        side: str,
+        trigger_price: float,
+        price_type: int = 1,
+        expiration: int = 3600,
+    ) -> Optional[Dict]:
+        """在交易所挂出价格触发的止盈单"""
+        if not self.can_trade:
+            return None
+
+        return await self._place_price_triggered_order(
+            contract=contract,
+            side=side,
+            trigger_price=trigger_price,
+            price_type=price_type,
+            expiration=expiration,
+            tp=True
+        )
+
+    async def cancel_stop_order(self, order_id: str) -> Optional[Dict]:
+        """取消触发单"""
+        if not self.can_trade or not order_id:
+            return None
+        return await self._run_async(
+            self.futures_api.cancel_price_triggered_order,
+            self.settle,
+            order_id,
+        )
+
+    async def cancel_all_reducing_triggers(self, side: Optional[str] = None) -> int:
+        """
+        取消所有 reduce-only 的触发单（用于平仓后扫尾）。
+        返回取消的数量。
+        """
+        if not self.can_trade:
+            return 0
+        try:
+            orders = await self._run_async(
+                self.futures_api.list_price_triggered_orders,
+                self.settle,
+                status="open"
+            )
+        except Exception:
+            return 0
+        cancelled = 0
+        for order in orders or []:
+            data = order.to_dict() if hasattr(order, "to_dict") else order
+            initial = data.get("initial_order") or {}
+            auto_size = str(initial.get("auto_size") or "").lower()
+            direction = "long" if "long" in auto_size else "short" if "short" in auto_size else None
+            if side and direction and direction != side.lower():
+                continue
+            order_id = data.get("id")
+            if not order_id:
+                continue
+            try:
+                await self.cancel_stop_order(str(order_id))
+                cancelled += 1
+            except Exception:
+                continue
+        return cancelled
+
+    async def _place_price_triggered_order(
+        self,
+        contract: str,
+        side: str,
+        trigger_price: float,
+        price_type: int,
+        expiration: int,
+        tp: bool = False
+    ) -> Optional[Dict]:
+        """
+        通用的价格触发单，tp=True 表示止盈（反向条件），tp=False 表示止损。
+        rule: 1 表示 >=，2 表示 <=
+        """
+        rule = 1 if tp else 2  # 默认假设多单止损用 <=，止盈用 >=
+        side_lower = side.lower()
+        if side_lower == "short":
+            rule = 2 if tp else 1
+        auto_size = "close_long" if side_lower == "long" else "close_short"
+        trigger_price_aligned = self._align_price(trigger_price, side_lower, tp)
         trigger = FuturesPriceTrigger(
             strategy_type=0,
             price_type=price_type,
-            price=str(trigger_price),
+            price=str(trigger_price_aligned),
             rule=rule,
             expiration=expiration,
         )
@@ -239,15 +343,24 @@ class GateIOAPI:
         )
         return response.to_dict() if response else None
 
-    async def cancel_stop_order(self, order_id: str) -> Optional[Dict]:
-        """取消触发单"""
-        if not self.can_trade or not order_id:
-            return None
-        return await self._run_async(
-            self.futures_api.cancel_price_triggered_order,
-            self.settle,
-            order_id,
-        )
+    def _align_price(self, price: float, side_lower: str, tp: bool) -> float:
+        """
+        按最小价格单位对齐触发价。
+        - 多单止损/空单止盈：触发价向下取整
+        - 多单止盈/空单止损：触发价向上取整
+        """
+        try:
+            from gateio_config import PRICE_TICK_SIZE
+            tick = max(float(PRICE_TICK_SIZE), 1e-12)
+        except Exception:
+            tick = 0.01
+        if tick <= 0:
+            tick = 0.01
+        if side_lower == "long":
+            aligned = (int(price / tick) * tick) if not tp else ((int((price + tick - 1e-12) / tick)) * tick)
+        else:
+            aligned = (int((price + tick - 1e-12) / tick) * tick) if not tp else (int(price / tick) * tick)
+        return round(aligned, 10)
 
     async def get_trade_history(
         self,
@@ -404,6 +517,100 @@ class GateIOAPI:
         if side.lower() in ("sell", "short"):
             contracts *= -1
         return contracts
+
+    async def get_trading_fee_rates(self, force_refresh: bool = False, ttl: float = 300.0) -> Dict[str, float]:
+        now = time.time()
+        cached = self._fee_cache
+        if (
+            not force_refresh
+            and cached.get("maker") is not None
+            and cached.get("taker") is not None
+            and now - cached.get("timestamp", 0.0) < ttl
+        ):
+            return {"maker": cached["maker"], "taker": cached["taker"]}
+
+        maker = cached.get("maker", MAKER_FEE_RATE)
+        taker = cached.get("taker", TAKER_FEE_RATE)
+        try:
+            fee_resp = await self._run_async(
+                self.futures_api.get_futures_fee,
+                self.settle,
+                contract=self.contract,
+            )
+            if fee_resp:
+                data = fee_resp.to_dict() if hasattr(fee_resp, "to_dict") else dict(fee_resp)
+                maker = float(data.get("maker_fee_rate", data.get("maker_fee", maker)))
+                taker = float(data.get("taker_fee_rate", data.get("taker_fee", taker)))
+        except Exception as exc:
+            self.logger.warning(f"获取实时费率失败，使用缓存: {exc}")
+            contract_info = await self._fetch_contract_snapshot()
+            if contract_info:
+                maker = float(contract_info.get("maker_fee_rate", maker))
+                taker = float(contract_info.get("taker_fee_rate", taker))
+
+        self._fee_cache.update({"maker": maker, "taker": taker, "timestamp": now})
+        return {"maker": maker, "taker": taker}
+
+    async def get_latest_funding_info(self, force_refresh: bool = False, ttl: float = 300.0) -> Dict[str, Optional[float]]:
+        now = time.time()
+        cached = self._funding_cache
+        if (
+            not force_refresh
+            and cached.get("timestamp", 0.0) > 0
+            and now - cached["timestamp"] < ttl
+        ):
+            return dict(cached)
+
+        contract_info = await self._fetch_contract_snapshot()
+        if contract_info:
+            rate = float(contract_info.get("funding_rate", cached.get("rate", 0.0)) or 0.0)
+            next_time = contract_info.get("funding_next_apply")
+            try:
+                next_ts = float(next_time) if next_time is not None else cached.get("next_funding_time")
+            except (TypeError, ValueError):
+                next_ts = cached.get("next_funding_time")
+            cached = {
+                "rate": rate,
+                "next_funding_time": next_ts,
+                "timestamp": now,
+            }
+            self._funding_cache = cached
+        return dict(self._funding_cache)
+
+    async def get_account_ledger(self, limit: int = 50) -> List[Dict]:
+        if not self.can_trade:
+            raise RuntimeError("实盘API未启用，无法查询资金流水")
+        limit = min(max(int(limit), 1), 200)
+        entries = await self._run_async(
+            self.futures_api.list_futures_account_book,
+            self.settle,
+            limit=limit,
+        )
+        rows: List[Dict] = []
+        for entry in entries or []:
+            data = entry.to_dict() if hasattr(entry, "to_dict") else dict(entry)
+            rows.append(
+                {
+                    "time": datetime.fromtimestamp(float(data.get("time", 0)) or time.time()),
+                    "change": float(data.get("change", 0.0)),
+                    "balance": float(data.get("balance", 0.0)),
+                    "type": data.get("type"),
+                    "text": data.get("text"),
+                }
+            )
+        return rows
+
+    async def _fetch_contract_snapshot(self) -> Optional[Dict]:
+        try:
+            contract = await self._run_async(
+                self.market_futures_api.get_futures_contract,
+                self.settle,
+                self.contract,
+            )
+        except Exception as exc:
+            self.logger.warning(f"获取合约元数据失败: {exc}")
+            return None
+        return contract.to_dict() if hasattr(contract, "to_dict") else dict(contract or {})
 
     async def _run_async(self, func, *args, **kwargs):
         loop = asyncio.get_running_loop()

@@ -89,6 +89,11 @@ class TrueHFTEngine:
                 self.api_client = GateIOAPI(enable_market_data=False, enable_trading=True)
             else:
                 self.use_real_api = False
+        self._fee_rates = {'maker': MAKER_FEE_RATE, 'taker': TAKER_FEE_RATE}
+        self._latest_funding_rate = 0.0
+        self._next_funding_time: Optional[float] = None
+        self._last_fee_refresh = 0.0
+        self.fee_refresh_interval = float(self.config.get('fee_refresh_interval', 300.0))
 
         self.data_manager = HFTDataManager()
         self.signal_generator = HFTSignalGenerator(
@@ -149,6 +154,7 @@ class TrueHFTEngine:
         self._trading_halted = False
         self._halt_reason = ""
         self._active_stop_orders: Dict[str, str] = {}
+        self._active_tp_orders: Dict[str, str] = {}
         self._trades_today: Deque[Dict] = deque(maxlen=500)
         self._trades_today_date = datetime.utcnow().date()
         self._long_trades_today = 0
@@ -158,6 +164,17 @@ class TrueHFTEngine:
         self._last_trend_log = 0.0
         self._last_trend_component_log = 0.0
         self._last_balance_refresh = 0.0
+        self._engine_started_at = time.time()
+        self.auto_relax_enabled = bool(self.config.get('auto_relax_guards', False))
+        self.auto_relax_window = max(float(self.config.get('auto_relax_block_window', 60.0)), 5.0)
+        self.auto_relax_idle_seconds = max(float(self.config.get('auto_relax_idle_seconds', 120.0)), 10.0)
+        self.auto_relax_relaxation_cooldown = max(
+            float(self.config.get('auto_relax_relaxation_cooldown', 20.0)),
+            1.0
+        )
+        self._guard_block_events: Deque[Tuple[float, str]] = deque(maxlen=500)
+        self._guard_block_counts: Dict[str, int] = {}
+        self._last_guard_relax_time = 0.0
         self._last_signal_debug_log = 0.0
         self._smoothed_bias = None
 
@@ -215,6 +232,7 @@ class TrueHFTEngine:
         if self.use_real_api and self.api_client:
             await self._apply_live_trading_settings()
             await self._refresh_account_info()
+            await self._refresh_fee_and_funding(force=True)
 
         self.logger = True
         try:
@@ -271,6 +289,9 @@ class TrueHFTEngine:
                                 f"| volume={volume_display}"
                             )
                             self._last_signal_debug_log = time.time()
+                            self._register_guard_pressure(
+                                self._categorize_guard_reason(debug_info.get('reason'))
+                            )
                     if signal and self._confirm_trend_direction(signal, trend_bias):
                         self._log_trend_analysis(trend_bias, signal)
                         signal_time = signal.get('timestamp')
@@ -363,8 +384,6 @@ class TrueHFTEngine:
         if self.last_signal_time and (now - self.last_signal_time).total_seconds() < self.config['signal_refresh_rate']:
             return
         if self.stats['total_trades'] >= self.config['daily_trade_limit']:
-            return
-        if self.open_positions and not self.signal_only_mode:
             return
         if not self._can_submit_trade(now, signal.get('direction')):
             return
@@ -479,14 +498,11 @@ class TrueHFTEngine:
                     f"| 累计 {self.stats['positions_opened']}"
                 )
             executor_handles_stops = getattr(self.executor, 'supports_exchange_stops', False)
-            if (
-                self.use_real_api
-                and self.api_client
-                and not self.signal_only_mode
-                and self.config.get('enable_protective_stops', True)
-                and not executor_handles_stops
-            ):
-                await self._register_protective_stop(position_id, signal, position)
+            if self.use_real_api and self.api_client and not self.signal_only_mode:
+                if self.config.get('enable_protective_stops', True) and not executor_handles_stops:
+                    await self._register_protective_stop(position_id, signal, position)
+                if self.config.get('enable_protective_take_profit', True):
+                    await self._register_protective_take_profit(position_id, signal, position)
 
     async def _monitor_positions(self, current_time: Optional[datetime] = None):
         if not self.open_positions:
@@ -530,16 +546,18 @@ class TrueHFTEngine:
         if not position:
             return
         await self._cancel_protective_stop(position_id)
+        await self._cancel_protective_take_profit(position_id)
+        await self._cancel_residual_triggers(position.get('direction'))
         price = self._current_price()
         remaining_ratio = max(position.get('remaining_ratio', 1.0), 0.0)
         if remaining_ratio <= 0:
             return
 
         pnl = self._calculate_ratio_pnl(position, price, remaining_ratio)
-        fee_rate = TAKER_FEE_RATE or 0.0
+        fee_rate = self._fee_rates.get('taker', TAKER_FEE_RATE)
         funding_rate = self._current_funding_rate()
-        position_value = self.current_capital * self.config['leverage'] * remaining_ratio
-        total_fee = position_value * (fee_rate + funding_rate)
+        notional = abs(float(position.get('size', 0.0))) * price * min(max(remaining_ratio, 0.0), 1.0)
+        total_fee = notional * (fee_rate + funding_rate)
         pnl -= total_fee
         self._finalize_signal_event(position_id, pnl, reason, price)
         self.current_capital += pnl
@@ -611,6 +629,7 @@ class TrueHFTEngine:
                 available = refreshed if refreshed > 0 else available
                 self._last_available_margin = available
                 self._last_balance_refresh = time.time()
+                await self._refresh_fee_and_funding()
             except Exception as exc:
                 available = self._last_available_margin or available
                 self._log(f"⚠️ 刷新余额失败，沿用 {available:.4f} USDT: {exc}")
@@ -637,15 +656,11 @@ class TrueHFTEngine:
 
     def _determine_trade_profile(self, signal: Dict, atr_value: Optional[float], entry_price: float) -> Dict[str, float]:
         mode = signal.get('market_state') or 'range'
-        if mode == 'trending':
-            target = self.config.get('trend_target_profit_ratio', self.config.get('target_profit_ratio', 0.0025))
-            stop = self.config.get('trend_stop_loss_ratio', self.config.get('stop_loss_ratio', 0.0015))
-        elif mode == 'range':
-            target = self.config.get('range_target_profit_ratio', self.config.get('target_profit_ratio', 0.0025))
-            stop = self.config.get('range_stop_loss_ratio', self.config.get('stop_loss_ratio', 0.0015))
-        else:
-            target = self.config.get('target_profit_ratio', 0.0025)
-            stop = self.config.get('stop_loss_ratio', 0.0015)
+        base_target = float(self.config.get('base_target_profit_ratio', self.config.get('target_profit_ratio', 0.0012)))
+        base_stop = float(self.config.get('base_stop_loss_ratio', self.config.get('stop_loss_ratio', 0.0008)))
+        fee_buffer = max(float(self._fee_rates.get('taker', 0.0)), 0.0) * 2
+        target = base_target + fee_buffer
+        stop = base_stop + fee_buffer
         stop = max(stop, float(self.config.get('min_stop_loss_ratio', stop)))
         if atr_value and entry_price > 0:
             atr_ratio = atr_value / entry_price
@@ -663,9 +678,42 @@ class TrueHFTEngine:
         if not self.use_real_api or not self.api_client:
             return
         account_info = await self.api_client.get_account_balance(fallback=self.current_capital)
+        available = float(account_info.get('available', self.current_capital))
+        total_equity = float(account_info.get('total', available))
+        if total_equity > 0:
+            self.current_capital = total_equity
+            if hasattr(self.position_manager, 'start_of_day_equity'):
+                self.position_manager.start_of_day_equity = total_equity
         self._last_account_info = account_info
-        self._last_available_margin = account_info.get('available', self.current_capital)
+        self._last_available_margin = available
         self._last_balance_refresh = time.time()
+        await self._refresh_fee_and_funding(force=True)
+
+    async def _refresh_fee_and_funding(self, force: bool = False):
+        if not self.use_real_api or not self.api_client:
+            return
+        now = time.time()
+        if not force and now - self._last_fee_refresh < self.fee_refresh_interval:
+            return
+        try:
+            fee_rates = await self.api_client.get_trading_fee_rates(force_refresh=force)
+            if fee_rates:
+                self._fee_rates.update(fee_rates)
+        except Exception as exc:
+            self._log(f"⚠️ 无法更新实时手续费，沿用缓存: {exc}")
+        try:
+            funding = await self.api_client.get_latest_funding_info(force_refresh=force)
+            if funding:
+                self._latest_funding_rate = float(funding.get('rate', self._latest_funding_rate) or 0.0)
+                next_time = funding.get('next_funding_time')
+                if next_time is not None:
+                    try:
+                        self._next_funding_time = float(next_time)
+                    except (TypeError, ValueError):
+                        pass
+        except Exception as exc:
+            self._log(f"⚠️ 无法更新资金费率，沿用估算: {exc}")
+        self._last_fee_refresh = now
 
     def _calculate_position(self, signal: Dict, fixed_margin: float) -> Optional[Dict]:
         price = max(self._current_price(), 1e-8)
@@ -708,8 +756,18 @@ class TrueHFTEngine:
                 self._last_margin_warning_time = now
             return None
 
-        if actual_margin > self.current_capital:
-            self._log(f"⚠️ 当前资金不足以满足最小合约保证金 ({actual_margin:.4f} USDT)")
+        capital_reference = self.current_capital
+        if self.use_real_api:
+            capital_reference = max(
+                float(self._last_available_margin or 0.0),
+                float(self._current_equity() or 0.0),
+                capital_reference
+            )
+        if actual_margin > capital_reference:
+            self._log(
+                f"⚠️ 当前资金不足以满足最小合约保证金 ({actual_margin:.4f} USDT)"
+                f"，可用 {capital_reference:.4f} USDT"
+            )
             return None
 
         return {
@@ -826,14 +884,21 @@ class TrueHFTEngine:
         snapshot = debug_snapshot or {}
         desired = snapshot.get('desired_direction') or signal.get('direction')
         condition_count = snapshot.get('condition_count')
-        l1 = '✔' if snapshot.get('l1') else '✘'
-        l2 = '✔' if snapshot.get('l2') else '✘'
-        l3 = '✔' if snapshot.get('l3') else '✘'
         market_state = snapshot.get('market_state') or signal.get('market_state') or 'unknown'
-        self._log(
-            f"🧠 信号依据: 市场 {market_state} | 方向 {desired or 'n/a'} | 条件数 {condition_count or 0} "
-            f"| L1 {l1} / L2 {l2} / L3 {l3}"
-        )
+        parts = [
+            f"🧠 信号依据: 市场 {market_state}",
+            f"方向 {desired or 'n/a'}",
+            f"条件数 {condition_count or 0}"
+        ]
+        l1_flag = snapshot.get('l1')
+        l2_flag = snapshot.get('l2')
+        l3_flag = snapshot.get('l3')
+        if any(flag is not None for flag in (l1_flag, l2_flag, l3_flag)):
+            l1 = '✔' if l1_flag else '✘'
+            l2 = '✔' if l2_flag else '✘'
+            l3 = '✔' if l3_flag else '✘'
+            parts.append(f"L1 {l1} / L2 {l2} / L3 {l3}")
+        self._log(" | ".join(parts))
         votes_detail = snapshot.get('votes') or signal.get('votes') or {}
         if isinstance(votes_detail, dict) and votes_detail:
             vote_icons = []
@@ -954,10 +1019,11 @@ class TrueHFTEngine:
 
     def _record_entry_block(self, reason: str):
         self.stats['entry_blocks'] += 1
-        if '冷却' in reason:
+        if '冷却' in reason or 'cooldown' in reason.lower():
             self.stats['duplicate_blocks'] += 1
         self.performance_monitor.record_guard_event('entry_block', reason)
         self._log(f"🚫 开仓被阻止: {reason}")
+        self._register_guard_pressure(self._categorize_guard_reason(reason))
 
     def _record_entry_frequency(self, timestamp: float):
         self._entry_second_window.append(timestamp)
@@ -968,6 +1034,117 @@ class TrueHFTEngine:
         self.performance_monitor.record_entry_frequency(count, window)
         if count > self._entry_log_threshold:
             self._log(f"📈 最近 {window:.1f}s 内开仓尝试 {count} 次")
+
+    def _categorize_guard_reason(self, reason: Optional[str]) -> str:
+        if not reason:
+            return "general"
+        lowered = reason.lower()
+        if "冷却" in reason or "cooldown" in lowered:
+            return "cooldown"
+        if "趋势" in reason or "trend" in lowered or "逆势" in reason:
+            return "trend"
+        if "volume" in lowered or "成交量" in reason:
+            return "volume"
+        if "orderbook" in lowered or "盘口" in reason or "imbalance" in lowered:
+            return "orderbook"
+        if "l1" in lowered or "l2" in lowered:
+            return "l1"
+        if "保证金" in reason or "margin" in lowered:
+            return "margin"
+        return "general"
+
+    def _register_guard_pressure(self, category: str):
+        if not self.auto_relax_enabled:
+            return
+        now = time.time()
+        self._guard_block_events.append((now, category))
+        self._guard_block_counts[category] = self._guard_block_counts.get(category, 0) + 1
+        window = self.auto_relax_window
+        while self._guard_block_events and now - self._guard_block_events[0][0] > window:
+            _, old_category = self._guard_block_events.popleft()
+            if old_category in self._guard_block_counts:
+                self._guard_block_counts[old_category] -= 1
+                if self._guard_block_counts[old_category] <= 0:
+                    self._guard_block_counts.pop(old_category, None)
+        block_threshold = max(int(self.config.get('auto_relax_block_threshold', 15)), 1)
+        total_blocks = sum(self._guard_block_counts.values())
+        idle_since = self._last_trade_timestamp or self._engine_started_at
+        idle_elapsed = now - idle_since
+        needs_relax = total_blocks >= block_threshold or idle_elapsed >= self.auto_relax_idle_seconds
+        if not needs_relax:
+            return
+        if now - self._last_guard_relax_time < self.auto_relax_relaxation_cooldown:
+            return
+        relax_category = category if total_blocks >= block_threshold else "general"
+        self._apply_guard_relaxation(relax_category)
+        self._guard_block_events.clear()
+        self._guard_block_counts.clear()
+        self._last_guard_relax_time = now
+
+    def _apply_guard_relaxation(self, category: str):
+        adjustments: List[str] = []
+        step_cd = float(self.config.get('auto_relax_cooldown_step', 0.5))
+        min_cd = float(self.config.get('auto_relax_min_cooldown', self.config.get('same_direction_cooldown_min', 0.0)))
+        min_signal_cd = float(self.config.get('auto_relax_signal_cooldown_min', 0.5))
+        if category in ("cooldown", "general"):
+            base_cd = float(self.config.get('same_direction_cooldown', step_cd))
+            new_cd = max(base_cd - step_cd, min_cd)
+            if new_cd < base_cd:
+                self.config['same_direction_cooldown'] = new_cd
+                self.same_direction_reentry_seconds = max(new_cd, self.min_reentry_seconds)
+                adjustments.append(f"同向冷却 {base_cd:.1f}->{new_cd:.1f}s")
+            signal_cd = getattr(self.signal_generator, 'cooldown_seconds', 0.0)
+            new_signal_cd = max(signal_cd - step_cd, min_signal_cd)
+            if new_signal_cd < signal_cd:
+                self.signal_generator.cooldown_seconds = new_signal_cd
+                adjustments.append(f"信号冷却 {signal_cd:.1f}->{new_signal_cd:.1f}s")
+        if category in ("trend", "general"):
+            step_trend = float(self.config.get('auto_relax_trend_step', 0.01))
+            min_trend = float(self.config.get(
+                'auto_relax_min_trend_threshold',
+                self.trend_guard.get('min_trade_threshold', 0.05)
+            ))
+            current_threshold = float(self.trend_guard.get('trade_threshold', self.trend_bias_threshold))
+            new_threshold = max(current_threshold - step_trend, min_trend)
+            if new_threshold < current_threshold:
+                self.trend_guard['trade_threshold'] = new_threshold
+                self.trend_bias_threshold = new_threshold
+                fallback = max(self.trend_guard.get('fallback_threshold', new_threshold), new_threshold, self.trend_neutral_tolerance)
+                self.trend_guard['fallback_threshold'] = fallback
+                self.trend_fallback_threshold = fallback
+                adjustments.append(f"趋势阈值 {current_threshold:.2f}->{new_threshold:.2f}")
+        if category in ("l1", "general"):
+            step_l1 = float(self.config.get('auto_relax_l1_step', 0.001))
+            min_l1 = float(self.config.get('auto_relax_min_l1_floor', 0.006))
+            current_ratio = float(self.config.get('l1_floor_ratio', 0.01))
+            new_ratio = max(current_ratio - step_l1, min_l1)
+            if new_ratio < current_ratio:
+                self.config['l1_floor_ratio'] = new_ratio
+                adjustments.append(f"L1阈值 {current_ratio:.3f}->{new_ratio:.3f}")
+            current_vm = float(self.config.get('l1_volatility_multiplier', 1.0))
+            max_vm = float(self.config.get('auto_relax_max_vol_multiplier', 1.4))
+            new_vm = min(max_vm, current_vm + step_l1 * 5)
+            if new_vm > current_vm:
+                self.config['l1_volatility_multiplier'] = new_vm
+                adjustments.append(f"L1波动乘数 {current_vm:.2f}->{new_vm:.2f}")
+        if category in ("volume", "orderbook", "general"):
+            step_vol = float(self.config.get('auto_relax_volume_step', 0.05))
+            min_vol = float(self.config.get('auto_relax_min_volume_ratio', 0.9))
+            vol_ratio = float(getattr(self.signal_generator, 'volume_ratio_threshold', 1.0))
+            new_vol_ratio = max(vol_ratio - step_vol, min_vol)
+            if new_vol_ratio < vol_ratio:
+                self.signal_generator.volume_ratio_threshold = new_vol_ratio
+                self.config['trend_volume_ratio'] = new_vol_ratio
+                adjustments.append(f"成交量阈值 {vol_ratio:.2f}->{new_vol_ratio:.2f}")
+            min_ob = float(self.config.get('auto_relax_min_orderbook_imbalance', 0.02))
+            ob_threshold = float(getattr(self.signal_generator, 'orderbook_imbalance_min', 0.0))
+            new_ob = max(ob_threshold - step_vol / 10, min_ob)
+            if new_ob < ob_threshold:
+                self.signal_generator.orderbook_imbalance_min = new_ob
+                self.config['trend_orderbook_min_imbalance'] = new_ob
+                adjustments.append(f"盘口不平衡 {ob_threshold:.3f}->{new_ob:.3f}")
+        if adjustments:
+            self._log("🪄 自动放宽条件: " + " | ".join(adjustments))
 
     def _calculate_direction_cooldown(self) -> Tuple[float, float, float]:
         base = float(self.config.get('same_direction_cooldown', 15.0))
@@ -1123,6 +1300,8 @@ class TrueHFTEngine:
             self.trade_timestamps.popleft()
 
     def _is_high_risk_time(self, now: datetime) -> bool:
+        if self.config.get('disable_high_risk_guard', False):
+            return False
         if self._news_cooldown_until:
             if now <= self._news_cooldown_until:
                 return True
@@ -1156,10 +1335,20 @@ class TrueHFTEngine:
     def _apply_progressive_margin(self, margin: float) -> float:
         if margin <= 0:
             return margin
-        if not self.config.get('enable_progressive_margin', False):
-            return margin
-        boosted = self.position_manager.get_progressive_boost(margin)
-        return min(boosted, self.current_capital)
+        start = int(self.config.get('loss_streak_reduce_start', 0))
+        if start > 0:
+            loss_streak = getattr(self.position_manager, 'loss_streak', 0)
+            if loss_streak >= start:
+                steps = loss_streak - start + 1
+                reduce_factor = float(self.config.get('loss_streak_reduce_factor', 0.5))
+                min_factor = float(self.config.get('loss_streak_min_factor', 0.25))
+                applied = max(min_factor, reduce_factor ** steps)
+                margin *= applied
+                self._log(f"⚠️ 连续亏损 {loss_streak} 次，自动减仓 {applied:.2f}x")
+        if self.config.get('enable_progressive_margin', False):
+            boosted = self.position_manager.get_progressive_boost(margin)
+            margin = min(boosted, self.current_capital)
+        return margin
 
     async def _register_protective_stop(self, position_id: str, signal: Dict, position: Dict):
         if not self.api_client:
@@ -1197,6 +1386,58 @@ class TrueHFTEngine:
         except Exception as exc:
             self._log(f"⚠️ 取消止损委托失败({stop_id}): {exc}")
 
+    async def _register_protective_take_profit(self, position_id: str, signal: Dict, position: Dict):
+        if not self.api_client:
+            return
+        attempts = 3
+        last_err = None
+        trigger_price = position.get('target_price')
+        if trigger_price is None:
+            return
+        for attempt in range(attempts):
+            try:
+                tp = await self.api_client.place_take_profit_order(
+                    contract=SYMBOL,
+                    side=signal['direction'],
+                    trigger_price=trigger_price,
+                    price_type=self.config.get('take_profit_order_price_type', 1),
+                    expiration=self.config.get('take_profit_order_expiration', 3600)
+                )
+                if tp and tp.get('id') is not None:
+                    order_id = str(tp.get('id'))
+                    self._active_tp_orders[position_id] = order_id
+                    self._log(f"🎯 已挂出交易所止盈单 #{order_id}")
+                    return
+            except Exception as exc:
+                last_err = exc
+                await asyncio.sleep(0.2 * (attempt + 1))
+        if last_err:
+            self._log(f"⚠️ 止盈委托失败: {last_err}")
+
+    async def _cancel_protective_take_profit(self, position_id: str):
+        if not self.api_client:
+            return
+        tp_id = self._active_tp_orders.pop(position_id, None)
+        if not tp_id:
+            return
+        try:
+            await self.api_client.cancel_stop_order(tp_id)
+        except Exception as exc:
+            self._log(f"⚠️ 取消止盈委托失败({tp_id}): {exc}")
+
+    async def _cancel_residual_triggers(self, direction: Optional[str] = None):
+        """
+        平仓后扫尾，取消同向的剩余触发单，避免残单。
+        """
+        if not self.api_client:
+            return
+        try:
+            cancelled = await self.api_client.cancel_all_reducing_triggers(direction)
+            if cancelled > 0:
+                self._log(f"🧹 已取消残留触发单 {cancelled} 个")
+        except Exception as exc:
+            self._log(f"⚠️ 残留触发单取消失败: {exc}")
+
     def _record_trade_for_survival(self, trade: Dict):
         timestamp = trade.get('timestamp') or datetime.utcnow()
         self._ensure_daily_counters(timestamp)
@@ -1211,6 +1452,8 @@ class TrueHFTEngine:
 
     def _enforce_survival_rules(self):
         if not self.config.get('enforce_survival_rules', True):
+            return
+        if self.config.get('disable_survival_rules', False):
             return
         trades_today = list(self._trades_today)
         conditions = self.survival_rules.emergency_stop_conditions(
@@ -1409,12 +1652,15 @@ class TrueHFTEngine:
                 self._log(
                     f"⏸️ 趋势强度 {trend_bias:.2f} 低于阈值 {threshold:.2f} (投票 {votes_text})，暂不交易"
                 )
+                self._register_guard_pressure("trend")
                 return False
         if trend_bias > 0 and signal_dir < 0:
             self._log(f"🚫 禁止逆势交易: 趋势 {trend_bias:.2f} 偏多，拒绝做空信号")
+            self._register_guard_pressure("trend")
             return False
         if trend_bias < 0 and signal_dir > 0:
             self._log(f"🚫 禁止逆势交易: 趋势 {trend_bias:.2f} 偏空，拒绝做多信号")
+            self._register_guard_pressure("trend")
             return False
 
         return True
@@ -1430,9 +1676,10 @@ class TrueHFTEngine:
             self._log(f"🎯 信号: {signal['direction']} 信心 {signal['confidence']:.2f}")
 
     def _current_funding_rate(self) -> float:
+        if self.use_real_api:
+            return float(self._latest_funding_rate or 0.0)
         now = datetime.utcnow()
         hour = now.hour
-        # 如果在资金费率收取时间前后 10 分钟，扣除 0.0008%
         if any(abs((hour - frh) % 24) < 0.2 for frh in FUNDING_RATE_TIMES):
             return 0.000008
         return 0.0
@@ -1488,10 +1735,10 @@ class TrueHFTEngine:
             return
 
         pnl = self._calculate_ratio_pnl(position, price, ratio)
-        fee_rate = TAKER_FEE_RATE or 0.0
+        fee_rate = self._fee_rates.get('taker', TAKER_FEE_RATE)
         funding_rate = self._current_funding_rate()
-        position_value = self.current_capital * self.config['leverage'] * ratio
-        total_fee = position_value * (fee_rate + funding_rate)
+        notional = abs(float(position.get('size', 0.0))) * price * min(max(ratio, 0.0), 1.0)
+        total_fee = notional * (fee_rate + funding_rate)
         pnl -= total_fee
 
         self.current_capital += pnl
@@ -1503,11 +1750,13 @@ class TrueHFTEngine:
     def _calculate_ratio_pnl(self, position: Dict, price: float, ratio: float) -> float:
         direction = position['direction']
         entry = position['entry_price']
-        if ratio <= 0:
+        size = abs(float(position.get('size', 0.0)))
+        if ratio <= 0 or size <= 0:
             return 0.0
-        delta = (price - entry) / max(entry, 1e-8) if direction == 'long' else (entry - price) / max(entry, 1e-8)
-        position_value = self.current_capital * self.config['leverage'] * ratio
-        return delta * position_value
+        effective_size = size * min(max(ratio, 0.0), 1.0)
+        if direction == 'long':
+            return (price - entry) * effective_size
+        return (entry - price) * effective_size
 
     async def _apply_live_trading_settings(self):
         leverage = int(self.config.get('leverage', 10))

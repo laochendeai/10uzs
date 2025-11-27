@@ -20,6 +20,7 @@ class AggressivePositionManager:
         self.consecutive_loss_pause = int(self.config.get('consecutive_loss_pause', 3))
         cooldown_minutes = max(float(self.config.get('loss_pause_cooldown_minutes', 15.0)), 0.0)
         self.loss_pause_cooldown = int(cooldown_minutes * 60)
+        self.disable_loss_pause = bool(self.config.get('disable_loss_pause', False))
         self.min_stop_distance = float(self.config.get('min_stop_distance', 0.0009))
         self.atr_stop_multiplier = float(self.config.get('atr_stop_multiplier', 1.1))
         self.high_volatility_threshold = float(self.config.get('high_volatility_threshold', 0.0025))
@@ -48,16 +49,18 @@ class AggressivePositionManager:
     def can_open(self, total_equity: float, now: Optional[datetime] = None) -> Tuple[bool, str]:
         now = now or datetime.utcnow()
         self._roll_day(total_equity, now)
-        if self.pause_until and now < self.pause_until:
+        if not self.disable_loss_pause and self.pause_until and now < self.pause_until:
             return False, "cooldown_active"
         if self.start_of_day_equity > 0:
             drawdown = (self.start_of_day_equity - total_equity) / max(self.start_of_day_equity, 1e-8)
             if drawdown >= self.daily_loss_limit:
-                self.pause_until = now + timedelta(seconds=self.loss_pause_cooldown or 60)
-                return False, "daily_loss_limit"
+                if not self.disable_loss_pause:
+                    self.pause_until = now + timedelta(seconds=self.loss_pause_cooldown or 60)
+                    return False, "daily_loss_limit"
         if self.consecutive_loss_pause > 0 and self.loss_streak >= self.consecutive_loss_pause:
-            self.pause_until = now + timedelta(seconds=self.loss_pause_cooldown or 60)
-            return False, "consecutive_losses"
+            if not self.disable_loss_pause:
+                self.pause_until = now + timedelta(seconds=self.loss_pause_cooldown or 60)
+                return False, "consecutive_losses"
         return True, ""
 
     def determine_margin(self, total_equity: float, leverage: float, stop_ratio: float,
@@ -91,7 +94,8 @@ class AggressivePositionManager:
             self.win_streak = 0
             self.loss_streak += 1
             if self.consecutive_loss_pause > 0 and self.loss_streak >= self.consecutive_loss_pause:
-                self.pause_until = now + timedelta(seconds=self.loss_pause_cooldown or 60)
+                if not self.disable_loss_pause:
+                    self.pause_until = now + timedelta(seconds=self.loss_pause_cooldown or 60)
 
     def get_progressive_boost(self, current_capital: float) -> float:
         """保留旧接口，按连胜情况微调仓位"""

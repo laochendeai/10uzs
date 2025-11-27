@@ -38,6 +38,7 @@ GATEIO_API_SECRET = os.getenv("GATEIO_API_SECRET", "")
 USE_GATEIO_MARKET_DATA = os.getenv("USE_GATEIO_MARKET_DATA", "false").lower() in ("1", "true", "yes")
 ENABLE_LIVE_TRADING = os.getenv("ENABLE_LIVE_TRADING", "false").lower() in ("1", "true", "yes")
 CONTRACT_VALUE = float(os.getenv("GATEIO_CONTRACT_VALUE", "0.01"))
+PRICE_TICK_SIZE = float(os.getenv("GATEIO_PRICE_TICK_SIZE", "0.01"))  # 最小价格单位
 
 # Gate.io VIP0费率配置
 MAKER_FEE_RATE = -0.00025  # Maker费率 -0.025% (返还)

@@ -67,7 +67,8 @@ SCALP_RISK_CONFIG: Dict[str, Any] = {
     'low_volatility_threshold': 0.0005,
     'high_volatility_scale': 0.75,
     'low_volatility_scale': 1.15,
-    'max_margin_ratio': 0.25
+    'max_margin_ratio': 0.25,
+    'disable_loss_pause': True  # 测试阶段关闭连续亏损暂停/冷却
 }
 
 
@@ -117,9 +118,9 @@ def get_parameter_preset(name: str) -> Dict[str, Any]:
 
 TRADE_GUARD_CONFIG: Dict[str, Any] = {
     # 防重复开仓
-    'min_reentry_seconds': 1.2,
-    'same_direction_reentry_seconds': 2.5,
-    'duplicate_window_seconds': 1.0,
+    'min_reentry_seconds': 3.0,
+    'same_direction_reentry_seconds': 6.0,
+    'duplicate_window_seconds': 1.5,
     'entry_frequency_buffer': 500,
     'entry_frequency_log_threshold': 1,
 
@@ -144,14 +145,14 @@ TRADE_GUARD_CONFIG: Dict[str, Any] = {
 
 TREND_GUARD_CONFIG: Dict[str, Any] = {
     # 趋势滤波参数
-    'bias_scale': 1600.0,               # 放大多周期趋势的权重
-    'trade_threshold': 0.12,            # 交易阈值
-    'min_trade_threshold': 0.05,        # 最低阈值
-    'neutral_tolerance': 0.02,          # 低于该值视为中性
-    'fallback_threshold': 0.06,         # 允许继续交易的兜底阈值
-    'strong_signal_confidence': 0.9,    # 趋势弱时允许放行的最小信心
-    'strong_signal_votes': 4,           # 需要通过的投票数量
-    'bias_smoothing': 0.25,             # EMA 平滑系数
+    'bias_scale': 2000.0,               # 放大多周期趋势的权重
+    'trade_threshold': 0.06,            # 交易阈值
+    'min_trade_threshold': 0.02,        # 最低阈值
+    'neutral_tolerance': 0.012,         # 低于该值视为中性
+    'fallback_threshold': 0.04,         # 允许继续交易的兜底阈值
+    'strong_signal_confidence': 0.8,    # 趋势弱时允许放行的最小信心
+    'strong_signal_votes': 2,           # 需要通过的投票数量
+    'bias_smoothing': 0.1,              # EMA 平滑系数
     'allow_neutral_bias': True          # 趋势为空时是否允许依赖其他过滤
 }
 
