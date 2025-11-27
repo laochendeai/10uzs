@@ -122,7 +122,7 @@ HFT_CONFIG = {
     'volatility_threshold': 0.001,   # 原有阈值（1‰）暂保留为次级过滤
     # 新增低波动免交易开关/阈值
     'low_volatility_block': True,     # 当波动低于阈值时不生成/不执行信号
-    'low_volatility_threshold': 0.0005,  # 50bp (0.05%) 的最小1m振幅/波动率阈值
+    'low_volatility_threshold': 0.0002,  # 20bp (0.02%) 的最小1m振幅/波动率阈值
     'avoid_funding_hours': True,
     'enable_signal_debug_log': True,
     'enable_trend_log': True,
