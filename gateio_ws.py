@@ -66,7 +66,7 @@ class GateIOWebsocket:
         contract: str = SYMBOL,
         settle: str = FUTURES_SETTLE,
         url: str = MARKET_DATA_WS_URL,
-        candlestick_interval: int = 900,
+        candlestick_interval: str = "10s",
         order_book_interval: str = "100ms",
         order_book_depth: int = 20,
     ):
@@ -184,36 +184,40 @@ class GateIOWebsocket:
     async def _subscribe(self, ws):
         """订阅ticker与candlestick"""
         timestamp = int(time.time())
+        contract = self.contract
+        # Gate 官方文档：WS 基础 URL 已含结算币，无需再传 settle；各频道 payload 需符合最新参数顺序
+        order_book_limit = str(self.order_book_depth)
+        order_book_interval = "0"  # futures.order_book 仅接受 interval=0（不做档位聚合）
         subscribe_msgs = [
             {
                 "time": timestamp,
                 "channel": "futures.tickers",
                 "event": "subscribe",
-                "payload": [self.contract],
+                "payload": [contract],
             },
             {
                 "time": timestamp,
                 "channel": "futures.book_ticker",
                 "event": "subscribe",
-                "payload": [self.contract],
+                "payload": [contract],
             },
             {
                 "time": timestamp,
                 "channel": "futures.candlesticks",
                 "event": "subscribe",
-                "payload": [self.contract, self.candle_interval],
+                "payload": [self.candle_interval, contract],
             },
             {
                 "time": timestamp,
                 "channel": "futures.order_book",
                 "event": "subscribe",
-                "payload": [self.contract, str(self.order_book_depth), self.order_book_interval],
+                "payload": [contract, order_book_limit, order_book_interval],
             },
             {
                 "time": timestamp,
                 "channel": "futures.trades",
                 "event": "subscribe",
-                "payload": [self.contract],
+                "payload": [contract],
             },
         ]
 
@@ -234,6 +238,9 @@ class GateIOWebsocket:
 
         if event == "subscribe":
             self.logger.debug(f"WebSocket订阅成功: {channel}")
+            return
+        if event == "error":
+            self.logger.error(f"WebSocket返回错误: {msg}")
             return
 
         if event not in ("update", "all"):

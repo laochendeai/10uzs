@@ -29,6 +29,7 @@ from gateio_config import (
     ENABLE_LIVE_TRADING,
     FUTURES_SETTLE,
     MARKET_DATA_API_BASE_URL,
+    MARKET_DATA_USE_MAINNET,
     ORDER_TYPE,
     SYMBOL,
     USE_GATEIO_MARKET_DATA,
@@ -47,6 +48,12 @@ class GateIOAPI:
         contract_value: float = CONTRACT_VALUE,
     ):
         self.logger = logging.getLogger(__name__)
+        # 确保加载环境变量/.env
+        try:
+            from api_config import load_config
+            load_config()
+        except Exception:
+            pass
         self.config = get_config()
         self.contract = self.config.contract or SYMBOL
         self.settle = self.config.settle or FUTURES_SETTLE
@@ -54,8 +61,11 @@ class GateIOAPI:
         self.trading_enabled = enable_trading and bool(self.config.api_key and self.config.api_secret)
         self.contract_value = contract_value if contract_value > 0 else 1.0
 
+        # 强制使用测试网端点（如果 config.testnet=True），避免环境变量未生效时落到主网域名
+        # 优先使用 fx-api-testnet 域名，避免 api-testnet.gateapi.io 解析不稳；仅在 testnet 且未指定使用主网行情时启用
+        api_host = "https://fx-api-testnet.gateio.ws/api/v4" if (self.config.testnet and not MARKET_DATA_USE_MAINNET) else API_BASE_URL
         configuration = Configuration(
-            host=API_BASE_URL,
+            host=api_host,
             key=self.config.api_key if self.trading_enabled else None,
             secret=self.config.api_secret if self.trading_enabled else None,
         )
@@ -63,7 +73,9 @@ class GateIOAPI:
         self.api_client = ApiClient(configuration)
         self.futures_api = FuturesApi(self.api_client)
 
-        market_host = MARKET_DATA_API_BASE_URL or API_BASE_URL
+        market_host = MARKET_DATA_API_BASE_URL or api_host
+        if self.config.testnet and not MARKET_DATA_USE_MAINNET:
+            market_host = "https://fx-api-testnet.gateio.ws/api/v4"
         if market_host == API_BASE_URL:
             self.market_api_client = self.api_client
             self.market_futures_api = self.futures_api
@@ -102,18 +114,100 @@ class GateIOAPI:
         if getattr(self, "market_api_client", None) and self.market_api_client is not self.api_client:
             await self._run_async(self.market_api_client.close)
 
+    async def get_recent_orders(
+        self,
+        hours: Optional[int] = None,
+        limit: Optional[int] = None,
+        contract: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        拉取近 hours 小时内的委托列表，按 Gate 提供的时间段查询接口。
+        """
+        if not self.can_trade:
+            raise RuntimeError("未配置交易密钥，无法查询历史委托")
+
+        from config import HISTORY_FETCH_CONFIG
+
+        hours = int(hours if hours is not None else HISTORY_FETCH_CONFIG.get("recent_hours", 8))
+        limit = int(limit if limit is not None else HISTORY_FETCH_CONFIG.get("max_orders", 200))
+        to_ts = int(time.time())
+        from_ts = to_ts - hours * 3600
+
+        orders = await self._run_async(
+            self.futures_api.get_orders_with_time_range,
+            self.settle,
+            contract=contract or self.contract,
+            _from=from_ts,
+            to=to_ts,
+            limit=limit,
+        )
+
+        parsed: List[Dict] = []
+
+        def _ts(val):
+            if val is None:
+                return None
+            try:
+                v = float(val)
+                if v > 1e12:  # ms
+                    v /= 1000.0
+                return datetime.fromtimestamp(v)
+            except Exception:
+                return None
+
+        for o in orders or []:
+            data = o.to_dict() if hasattr(o, "to_dict") else dict(o)
+            parsed.append(
+                {
+                    "id": str(data.get("id") or ""),
+                    "contract": data.get("contract") or self.contract,
+                    "side": data.get("side"),
+                    "price": float(data.get("price", 0) or 0),
+                    "size": float(data.get("size", 0) or 0),
+                    "left": float(data.get("left", 0) or 0),
+                    "fill_price": float(data.get("fill_price", 0) or 0),
+                    "status": data.get("status"),
+                    "finish_as": data.get("finish_as"),
+                    "tif": data.get("tif"),
+                    "reduce_only": data.get("is_reduce_only"),
+                    "create_time": _ts(data.get("create_time") or data.get("create_time_ms")),
+                    "update_time": _ts(data.get("update_time") or data.get("update_time_ms")),
+                }
+            )
+        return parsed
+
     async def get_klines(self, interval: str, limit: int) -> List[Dict]:
         """获取K线数据"""
         if not self.can_use_market_data:
             raise RuntimeError("未启用Gate.io行情数据")
 
-        candles = await self._run_async(
-            self.market_futures_api.list_futures_candlesticks,
-            self.settle,
-            self.contract,
-            limit=limit,
-            interval=interval,
-        )
+        try:
+            candles = await self._run_async(
+                self.market_futures_api.list_futures_candlesticks,
+                self.settle,
+                self.contract,
+                limit=limit,
+                interval=interval,
+            )
+        except Exception as exc:
+            # DNS 或测试网端点不可用时回退主网行情，仅用于暖机
+            if self.config.testnet:
+                self.logger.warning(f"测试网行情失败，尝试主网作为暖机: {exc}")
+                try:
+                    fallback_client = ApiClient(Configuration(host=API_BASE_URL))
+                    fallback_api = FuturesApi(fallback_client)
+                    candles = await self._run_async(
+                        fallback_api.list_futures_candlesticks,
+                        self.settle,
+                        self.contract,
+                        limit=limit,
+                        interval=interval,
+                    )
+                except Exception as exc2:
+                    self.logger.error(f"主网回退也失败: {exc2}")
+                    raise
+            else:
+                raise
 
         rows = []
         for candle in candles:
@@ -514,11 +608,10 @@ class GateIOAPI:
         return info.get('available', fallback)
 
     def _to_contracts(self, size: float, side: str) -> int:
-        contracts = int(math.floor(abs(size) / self.contract_value))
-        if contracts == 0:
-            contracts = 1
+        # size 已经是“张数”，无需再按合约面值换算，防止下单量被放大
+        contracts = max(1, int(round(abs(size))))
         if side.lower() in ("sell", "short"):
-            contracts *= -1
+            contracts = -contracts
         return contracts
 
     async def get_trading_fee_rates(self, force_refresh: bool = False, ttl: float = 300.0) -> Dict[str, float]:
@@ -553,6 +646,34 @@ class GateIOAPI:
 
         self._fee_cache.update({"maker": maker, "taker": taker, "timestamp": now})
         return {"maker": maker, "taker": taker}
+
+    async def get_positions(self, contract: Optional[str] = None) -> List[Dict]:
+        """查询持仓（合约）。"""
+        if not self.can_trade:
+            return []
+        try:
+            if contract:
+                resp = [await self._run_async(self.futures_api.get_position, self.settle, contract)]
+            else:
+                resp = await self._run_async(self.futures_api.list_positions, self.settle)
+        except Exception as exc:
+            self.logger.error(f"获取持仓失败: {exc}")
+            return []
+        rows = []
+        for p in resp or []:
+            data = p.to_dict() if hasattr(p, "to_dict") else dict(p)
+            rows.append(
+                {
+                    "contract": data.get("contract"),
+                    "size": float(data.get("size") or 0.0),
+                    "entry_price": float(data.get("entry_price") or 0.0),
+                    "margin": float(data.get("margin") or 0.0),
+                    "mark_price": float(data.get("mark_price") or 0.0),
+                    "leverage": float(data.get("leverage") or 0.0),
+                    "unrealized_pnl": float(data.get("unrealized_pnl") or 0.0),
+                }
+            )
+        return rows
 
     async def get_latest_funding_info(self, force_refresh: bool = False, ttl: float = 300.0) -> Dict[str, Optional[float]]:
         now = time.time()

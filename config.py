@@ -9,6 +9,26 @@ from itertools import product
 from pathlib import Path
 from typing import List, Dict, Any
 
+from gateio_config import MARKET_DATA_API_BASE_URL, SYMBOL, TAKER_FEE_RATE
+
+# TUI 显示行数配置，限制 WS 行情滚动高度
+UI_DISPLAY_CONFIG: Dict[str, int] = {
+    'ticker_history_rows': 3,
+    'order_book_rows': 3,
+    'log_rows': 20,
+    'tui_refresh_seconds': 1,  # TUI刷新频率，适当放缓避免刷屏
+}
+
+# 历史委托/成交拉取配置
+HISTORY_FETCH_CONFIG: Dict[str, Any] = {
+    'recent_hours': 8,
+    'max_orders': 200,
+}
+
+# 网格下单防刷屏配置
+GRID_ORDER_COOLDOWN_SECONDS = 10  # 同一价位重复挂单的冷却时间
+GRID_GLOBAL_THROTTLE_SECONDS = 2   # 单侧全局节流，避免同一秒批量挂单
+
 
 def _default_parameter_grid() -> List[Dict[str, Any]]:
     """自动生成≥50组参数组合，用于大规模扫描."""
@@ -175,4 +195,119 @@ MONITORING_CONFIG: Dict[str, Any] = {
     'report_path': str(Path('test') / 'monitor_auto20.jsonl'),
     'heartbeat_interval_seconds': 10.0,
     'heartbeat_stall_warning_seconds': 30.0
+}
+
+# Gate.io ETH 永续合约日内策略研究配置
+GATEIO_ETH_DATA_CONFIG: Dict[str, Any] = {
+    'contract': SYMBOL,
+    'interval': '1m',
+    'interval_seconds': 60,
+    'days': 3,  # 拉取最近天数的K线数据
+    'limit': 200,  # 单次API最多条数
+    'api_base': MARKET_DATA_API_BASE_URL,
+    'fallback_api_bases': [
+        "https://fx-api.gateio.ws/api/v4",
+        "https://api.gateio.ws/api/v4"
+    ],
+    'output_path': str(Path('data') / 'gateio_eth_perp_1m.csv'),
+    'fallback_local_files': [
+        str(Path('data') / 'gateio_eth_perp_1m.csv'),
+        str(Path('data') / 'ethusd_bitfinex_2019_1m.csv')
+    ],
+    'max_bars': 12000,  # 兜底数据最多读取的K线数量，避免回测超时
+    'timeout_seconds': 10,
+    'sleep_seconds': 0.6,
+    'use_cache': True
+}
+
+ETH_INTRADAY_RESEARCH_CONFIG: Dict[str, Any] = {
+    'results_path': str(Path('test') / 'eth_intraday_research.jsonl'),
+    'fee_rate': TAKER_FEE_RATE,
+    'slippage_pct': 0.0002,
+    'min_trades': 500,
+    'win_rate_threshold': 0.70,
+    'expectancy_threshold': 0.0,
+    'breakout_params': {
+        'lookback': [30, 45, 60],
+        'buffer_pct': [0.0005, 0.0008],
+        'volume_ratio_min': [1.4, 1.8],
+        'take_profit_pct': [0.0025, 0.0032],
+        'stop_loss_pct': [0.0015, 0.0020],
+        'max_hold_bars': [40, 60],
+        'risk_scale_high_vol': [0.5, 0.7]
+    },
+    'rsi_params': {
+        'periods': [12, 14],
+        'lower': [28, 32],
+        'upper': [68, 72],
+        'take_profit_pct': [0.0015, 0.0020],
+        'stop_loss_pct': [0.0012, 0.0016],
+        'max_hold_bars': [30, 45],
+        'risk_scale_high_vol': [0.5, 0.7]
+    },
+    'volatility_filter': {
+        'atr_window': 14,
+        'atr_pct_threshold': 0.015
+    },
+    'orderbook_filter': {
+        'imbalance_min': 0.15
+    }
+}
+
+# 双模式（箱体网格 + 突破趋势）策略参数
+DUAL_MODE_CONFIG: Dict[str, Any] = {
+    'atr_window': 14,
+    'atr_mult_grid': 0.8,         # 箱体容差/网格高度 ATR 放大倍数
+    'atr_mult_trend_sl': 1.2,     # 趋势止损 ATR 倍数
+    'atr_mult_trend_trail': 1.5,  # 趋势移动止损 ATR 倍数
+    # “视觉”箱体判定（更接近人工目测）
+    'box_visual_lookback': 180,          # 固定窗口长度（更贴近5m可视区间）
+    'box_visual_quantile': 0.1,          # 使用分位数定位上下沿，替代剪裁均值
+    'box_visual_max_height_pct': 0.025,  # 允许的最大箱体宽度（相对中轴）
+    'box_visual_max_slope_pct': 0.0015,  # 中轴最大坡度
+    'box_visual_touch_tol_pct': 0.0020,  # 触碰容差
+    'box_visual_min_touches': 1,         # 上下沿最少触碰次数
+    'box_lookback': 120,
+    'box_alt_lookbacks': [],        # 保留占位，现已关闭降级窗口
+    'box_alt_tol_pct': 0.006,     # 降级窗口容差 (0.6%)
+    'box_min_bars': 120,
+    'box_dynamic_min_lookback': 120,
+    'box_dynamic_max_lookback': 360,
+    'box_dynamic_step': 10,
+    'box_tol_pct': 0.008,          # 放宽容差
+    'box_quantile': 0.05,
+    'box_max_slope_pct': 0.0015,   # 放宽坡度
+    'box_atr_mult': 2.0,          # ATR 动态容差系数
+    'box_fallback_height_pct': 0.012,  # 缠论回退可接受的最大箱体高度（相对均价）
+    'grid_levels': [0.25, 0.5],   # 相对箱体高度的网格层，正负对称
+    'grid_weights': [1.0, 0.6],   # 各层仓位权重（边界重）
+    'grid_fee_buffer_pct': 0.0010,   # 费用缓冲(双边)占比，用于限制过密网格
+    'grid_slippage_pct': 0.0005,     # 预估滑点占比
+    'grid_min_spacing_pct': 0.0015,  # 最小层间距占比，避免箱体过窄仍强行铺网格
+    'grid_min_size': 1.0,            # 网格最小下单张数
+    'grid_size_cap': 100.0,          # 网格单次最大张数
+    'grid_max_exposure_pct': 0.10,
+    'grid_single_risk_pct': 0.005,
+    'trend_break_vol_ratio': 1.5, # 突破时成交量放大量化
+    'trend_confirm_bars': 3,      # 突破持续时间确认
+    'trend_tp_pct': 0.008,        # 趋势止盈初始比例
+    'trend_max_drawdown_pct': 0.05,
+    'fund_allocation': {
+        'grid': 0.6,
+        'trend': 0.3,
+        'cash': 0.1
+    },
+    # 风控与仓位
+    'risk_per_trade': 0.01,            # 单笔风险占总权益比例
+    'max_gross_exposure_pct': 0.3,     # 总暴露上限（绝对值）
+    'direction_exposure_pct': 0.2,     # 单方向暴露上限
+    'daily_loss_limit_pct': 0.05,      # 日内最大亏损
+    'consecutive_loss_limit': 4,       # 连续亏损笔数暂停
+    'add_on_pullback_pct': 0.003,      # 趋势加仓回踩幅度
+    'max_add_positions': 2,            # 趋势最多加仓次数
+    # 缠论/波段回退参数
+    'swing_change_threshold': 0.004,   # 缠论分型/波段反转阈值
+    'swing_min_bars_between': 3,       # 分型间最小间隔
+    'swing_max_pivots': 10,            # 回退箱体使用的最大 pivot 数
+    'swing_atr_mult': 0.0              # ATR 动态阈值倍数，0 为关闭
 }
